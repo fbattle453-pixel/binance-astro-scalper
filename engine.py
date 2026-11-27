@@ -1,146 +1,255 @@
-import streamlit as st
 import requests
-import os
-import time
+import pandas as pd
+import numpy as np
+import ephem
 import pytz
-from datetime import datetime
-from engine import run_market_scan
+import hashlib
+from datetime import datetime, timedelta
 
-st.set_page_config(page_title="Futures Astro Scalp Scanner", page_icon="⚡", layout="wide")
+SLASH = chr(47)
+COLON = chr(58)
+DOT = chr(46)
+PROTO = "https" + COLON + SLASH + SLASH
+HOST = DOT.join(["futures", "kraken", "com"])
+BASE = PROTO + HOST + "/derivatives/api/v3"
+CHART_BASE = PROTO + HOST + "/api/charts/v1/trade"
+HEADERS = {"User-Agent": "Mozilla/5.0"}
+
+NON_CRYPTO_EXCLUDE = {
+    "XAG", "XAU", "XPT", "XPD", "EUR", "GBP", "JPY", "AUD", "CAD", "CHF", "NZD",
+    "SOXL", "SOXS", "TSLA", "NVDA", "AAPL", "MSFT", "AMZN", "GOOGL", "META",
+    "AMD", "COIN", "MSTR", "PLTR", "SPY", "QQQ", "IWM", "TLT", "GLD", "SLV",
+    "HOOD", "GME", "AMC", "NFLX", "INTC", "SMCI", "ARM", "MARA", "RIOT"
+}
+
+KNOWN_RULERS = {
+    "SOL": "Sun", "XRP": "Jupiter", "SUI": "Moon", "NEAR": "Mercury",
+    "LINK": "Saturn", "FET": "Uranus", "AVAX": "Mars", "DOT": "Jupiter",
+    "ADA": "Venus", "UNI": "Mercury", "ATOM": "Uranus", "TRX": "Mars",
+    "OM": "Saturn", "SSV": "Saturn", "HYPE": "Uranus", "APT": "Mercury",
+    "ARB": "Uranus", "OP": "Mercury", "INJ": "Mars", "TIA": "Uranus",
+    "LTC": "Moon", "FIL": "Saturn", "RENDER": "Uranus", "SEI": "Moon",
+    "TON": "Mercury", "ENA": "Venus", "WLD": "Uranus", "ICP": "Saturn",
+    "ETC": "Saturn", "ALGO": "Mercury", "VET": "Venus", "RNDR": "Uranus"
+}
+PLANETS = ["Sun", "Moon", "Mars", "Mercury", "Jupiter", "Venus", "Saturn"]
+HORA_ORDER = ["Sun", "Venus", "Mercury", "Moon", "Saturn", "Jupiter", "Mars"]
+NAKSHATRAS = [
+    "Ashwini", "Bharani", "Krittika", "Rohini", "Mrigashira", "Ardra",
+    "Punarvasu", "Pushya", "Ashlesha", "Magha", "Purva Phalguni", "Uttara Phalguni",
+    "Hasta", "Chitra", "Swati", "Vishakha", "Anuradha", "Jyeshtha",
+    "Mula", "Purva Ashadha", "Uttara Ashadha", "Shravana", "Dhanishta",
+    "Shatabhisha", "Purva Bhadrapada", "Uttara Bhadrapada", "Revati"
+]
 
 
-def get_secret(key):
+def get_ruler(base_coin):
+    if base_coin in KNOWN_RULERS:
+        return KNOWN_RULERS[base_coin]
+    idx = int(hashlib.md5(base_coin.encode()).hexdigest(), 16) % len(PLANETS)
+    return PLANETS[idx]
+
+
+def get_astro_context(mode="Western"):
+    now_utc = datetime.now(pytz.UTC)
+    obs = ephem.Observer()
+    obs.date = now_utc.strftime("%Y/%m/%d %H:%M:%S")
+    bodies = {
+        "Sun": ephem.Sun(obs),
+        "Moon": ephem.Moon(obs),
+        "Mars": ephem.Mars(obs),
+        "Mercury": ephem.Mercury(obs),
+        "Jupiter": ephem.Jupiter(obs),
+        "Venus": ephem.Venus(obs),
+        "Saturn": ephem.Saturn(obs),
+    }
+    year_frac = now_utc.year + (now_utc.timetuple().tm_yday / 365.25)
+    ayanamsa = (23.853 + (year_frac - 2000.0) * 0.0139688) if mode == "Vedic" else 0.0
+    longs = {k: (np.degrees(ephem.Ecliptic(v).lon) - ayanamsa) % 360.0 for k, v in bodies.items()}
+
+    weekday_map = {6: 0, 0: 3, 1: 6, 2: 2, 3: 4, 4: 1, 5: 5}
+    hora = HORA_ORDER[(weekday_map[now_utc.weekday()] + now_utc.hour) % 7]
+    moon_deg = longs["Moon"]
+    aspects = []
+    for p, deg in longs.items():
+        if p == "Moon":
+            continue
+        diff = min(abs(moon_deg - deg) % 360, 360 - (abs(moon_deg - deg) % 360))
+        for ang, lbl, mod in [(0, "Conj", 12), (60, "Sextile", 8), (90, "Square", -10), (120, "Trine", 12), (180, "Opp", -10)]:
+            if abs(diff - ang) <= 1.0:
+                aspects.append((p, lbl, mod))
+    nak = NAKSHATRAS[int(moon_deg // (360.0 / 27.0))]
+    return {
+        "hora": hora,
+        "aspects": aspects,
+        "nakshatra": nak,
+        "mins": max(15, min(45, 60 - now_utc.minute)),
+    }
+
+
+def score_astro(base_coin, ctx, mode):
+    ruler = get_ruler(base_coin)
+    score = 55.0
+    notes = [f"Ruler:{ruler} | Hora:{ctx['hora']}"]
+    if ctx["hora"] == ruler:
+        score += 25.0
+        notes.append(f"{ruler} Hora(+25)")
+    elif ctx["hora"] in ["Jupiter", "Venus", "Sun"]:
+        score += 10.0
+    for p, lbl, mod in ctx["aspects"]:
+        score += mod * (1.5 if p == ruler else 0.5)
+        if p == ruler:
+            notes.append(f"Moon {lbl} {ruler}")
+    if mode == "Vedic":
+        notes.append(f"Nak:{ctx['nakshatra']}")
+        if ctx["nakshatra"] in ["Rohini", "Pushya", "Hasta", "Shravana", "Revati", "Ashwini"]:
+            score += 10.0
+    return float(np.clip(score, 0, 100)), " | ".join(notes)
+
+
+def fetch_candidates():
     try:
-        if key in st.secrets:
-            return str(st.secrets[key]).strip()
-    except Exception:
-        pass
-    return os.environ.get(key, "").strip()
+        r = requests.get(BASE + "/tickers", headers=HEADERS, timeout=8)
+        if r.status_code != 200:
+            return [], f"Kraken HTTP {r.status_code}"
+        tickers = r.json().get("tickers", [])
+        out = []
+        for t in tickers:
+            sym = t.get("symbol", "")
+            if not sym.startswith("PF_") or not sym.endswith("USD"):
+                continue
+            base = sym.replace("PF_", "").replace("USD", "")
+            if base == "XBT":
+                base = "BTC"
+            if base in NON_CRYPTO_EXCLUDE:
+                continue
 
+            p = float(t.get("last") or 0)
+            vol_usd = float(t.get("volumeQuote") or 0)
+            open24 = float(t.get("open24h") or 0)
+            pct = abs((p - open24) / open24) * 100.0 if open24 > 0 else 1.0
+            fund = float(t.get("fundingRate") or 0) * 100.0
 
-def send_telegram(msg):
-    token = get_secret("TELEGRAM_BOT_TOKEN")
-    chat_id = get_secret("TELEGRAM_CHAT_ID")
-    if not token or not chat_id:
-        return False, "Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID"
-    try:
-        host = ".".join(["api", "telegram", "org"])
-        endpoint = "https://" + host + "/bot" + token + "/sendMessage"
-        r = requests.post(endpoint, json={"chat_id": chat_id, "text": msg, "parse_mode": "Markdown"}, timeout=8)
-        if r.status_code == 200:
-            return True, "OK"
-        return False, r.json().get("description", f"HTTP {r.status_code}")
+            if 0.10 <= p <= 100.00 and vol_usd >= 100_000:
+                out.append({
+                    "inst": sym,
+                    "base": base,
+                    "symbol": f"{base}USDT",
+                    "price": p,
+                    "vol": vol_usd,
+                    "funding": fund,
+                    "rank": pct * np.log10(max(vol_usd, 10)),
+                })
+        return sorted(out, key=lambda x: x["rank"], reverse=True)[:25], f"Crypto Only ({len(out)} matched)"
     except Exception as e:
-        return False, str(e)
+        return [], f"Err: {e}"
 
 
-if "last_alert" not in st.session_state:
-    st.session_state.last_alert = {}
-if "scanner_running" not in st.session_state:
-    st.session_state.scanner_running = True
-if "saved_df" not in st.session_state:
-    st.session_state.saved_df = None
-if "saved_signal" not in st.session_state:
-    st.session_state.saved_signal = None
-if "saved_matched" not in st.session_state:
-    st.session_state.saved_matched = 0
-if "saved_status" not in st.session_state:
-    st.session_state.saved_status = "Waiting for first scan..."
-if "saved_time" not in st.session_state:
-    st.session_state.saved_time = "—"
+def run_market_scan(mode="Western"):
+    cands, status_msg = fetch_candidates()
+    ctx = get_astro_context(mode)
+    rows = []
+    for c in cands:
+        inst = c["inst"]
+        try:
+            k5 = requests.get(f"{CHART_BASE}/{inst}/5m", headers=HEADERS, timeout=5).json().get("candles", [])[-30:]
+            ob_data = requests.get(BASE + "/orderbook", params={"symbol": inst}, headers=HEADERS, timeout=5).json().get("orderBook", {})
+            if len(k5) < 15:
+                continue
 
-st.title("⚡ Futures Market-Wide Astro Scalper ($0.10 – $100)")
+            df5 = pd.DataFrame(k5).astype(float)
+            price = float(df5["close"].iat[-1])
+            if price <= 0:
+                continue
+            e9 = float(df5["close"].ewm(span=9).mean().iat[-1])
+            e21 = float(df5["close"].ewm(span=21).mean().iat[-1])
+            vwap = float((df5["close"] * df5["volume"]).sum() / max(df5["volume"].sum(), 1e-9))
 
-c1, c2, c3, c4 = st.columns([0.8, 0.8, 1.5, 1.1])
-with c1:
-    if st.button("▶️ Start Scanner", use_container_width=True, type="primary" if not st.session_state.scanner_running else "secondary"):
-        st.session_state.scanner_running = True
-        st.rerun()
-with c2:
-    if st.button("⏹️ Stop Scanner", use_container_width=True, type="primary" if st.session_state.scanner_running else "secondary"):
-        st.session_state.scanner_running = False
-        st.rerun()
-with c3:
-    astro_mode = st.radio("Astrology System:", ["Western", "Vedic"], horizontal=True)
-with c4:
-    tg_ready = bool(get_secret("TELEGRAM_BOT_TOKEN") and get_secret("TELEGRAM_CHAT_ID"))
-    state_badge = "🟢 RUNNING (20s)" if st.session_state.scanner_running else "⏸️ PAUSED (FROZEN)"
-    st.markdown(f"**Status:** {state_badge}  \n**Telegram:** {'✅ Connected' if tg_ready else '⚠️ Missing Secrets'}")
+            d = df5["close"].diff()
+            gain = float(d.clip(lower=0).rolling(14).mean().iat[-1])
+            loss = float((-d.clip(upper=0)).rolling(14).mean().iat[-1])
+            rsi = 100.0 - (100.0 / (1.0 + gain / max(loss, 1e-9)))
 
-with st.sidebar:
-    st.header("🛡️ 20x–50x Position Calculator")
-    wallet_usdt = st.number_input("Futures Wallet (USDT)", min_value=10.0, value=500.0, step=50.0)
-    risk_pct = st.slider("Max Risk per Scalp (%)", min_value=0.5, max_value=5.0, value=2.0, step=0.5)
-    st.divider()
-    if st.button("📲 Send Test Telegram Alert", use_container_width=True):
-        ok, info = send_telegram("✅ *Test Alert:* Futures Astro Scalper is connected!")
-        if ok:
-            st.success("Sent! Check your Telegram.")
-        else:
-            st.error(f"Telegram Error: {info}")
+            tr = pd.concat([
+                df5["high"] - df5["low"],
+                (df5["high"] - df5["close"].shift()).abs(),
+                (df5["low"] - df5["close"].shift()).abs(),
+            ], axis=1).max(axis=1)
+            atr_val = float(tr.rolling(14).mean().iat[-1])
+            atr_pct = max(0.35, min(0.75, (atr_val / price) * 100.0))
 
-if st.session_state.scanner_running or st.session_state.saved_df is None:
-    with st.spinner("Scanning Futures Order Books & Planetary Transits..."):
-        df_results, signal, matched, debug_msg = run_market_scan(astro_mode)
-        if not df_results.empty:
-            st.session_state.saved_df = df_results
-            st.session_state.saved_signal = signal
-            st.session_state.saved_matched = matched
-            st.session_state.saved_status = debug_msg
-            st.session_state.saved_time = datetime.now(pytz.timezone("Asia/Karachi")).strftime("%I:%M:%S %p PKT")
-else:
-    st.info("⏸️ **Scanner Stopped:** Holding last qualified signal on screen. Click **▶️ Start Scanner** above to resume live market scanning.")
+            bids = ob_data.get("bids", [])[:20]
+            asks = ob_data.get("asks", [])[:20]
+            bid_vol = sum(float(qty) for _, qty in bids)
+            ask_vol = sum(float(qty) for _, qty in asks)
+            ob = bid_vol / max(ask_vol, 1e-9)
+            fund = c["funding"]
 
-df_display = st.session_state.saved_df
-signal = st.session_state.saved_signal
-matched = st.session_state.saved_matched
-debug_msg = st.session_state.saved_status
-last_time = st.session_state.saved_time
+            lp, sp = 45.0, 45.0
+            if e9 > e21:
+                lp += 20.0
+            else:
+                sp += 20.0
+            if price > vwap:
+                lp += 12.0
+            else:
+                sp += 12.0
+            if ob >= 1.25:
+                lp += 15.0
+            elif ob <= 0.80:
+                sp += 15.0
+            if 50 <= rsi <= 72:
+                lp += 8.0
+            elif 28 <= rsi <= 50:
+                sp += 8.0
 
-st.caption(f"Last Scan: {last_time} | Filtered Pairs ($0.10–$100): Top {matched} analyzed | Mode: {astro_mode} | Status: {debug_msg}")
+            direction = "LONG" if lp >= sp else "SHORT"
+            flow = float(np.clip(max(lp, sp), 0, 100))
+            astro, anote = score_astro(c["base"], ctx, mode)
+            tot = round(flow * 0.6 + astro * 0.4, 1)
 
-if signal:
-    risk_usdt = wallet_usdt * (risk_pct / 100.0)
-    rec_margin = round((risk_usdt / (signal["sl_pct"] / 100.0)) / signal["leverage"], 2)
-    dir_icon = "🟢 LONG" if signal["direction"] == "LONG" else "🔴 SHORT"
-    st.success(f"### 🎯 TOP QUALIFIED SCALP: **{signal['symbol']}** — {dir_icon} ({signal['score']}%)")
+            rows.append({
+                "Symbol": c["symbol"],
+                "Price": price,
+                "24h Vol ($M)": round(c["vol"] / 1e6, 2),
+                "Direction": direction,
+                "5m RSI": round(rsi, 1),
+                "OB Ratio": round(ob, 2),
+                "Funding %": round(fund, 4),
+                "Flow Score": round(flow, 1),
+                "Astro Score": round(astro, 1),
+                "Total Score": tot,
+                "ATR %": atr_pct,
+                "Astro Note": anote,
+            })
+        except Exception:
+            continue
 
-    m1, m2, m3, m4, m5, m6 = st.columns(6)
-    m1.metric("Entry Price", f"${signal['entry']:.4f}")
-    m2.metric("Leverage (Isolated)", f"{signal['leverage']}x")
-    m3.metric("TP 1 (50%)", f"${signal['tp1']:.4f}")
-    m4.metric("TP 2 (Runner)", f"${signal['tp2']:.4f}")
-    m5.metric("Stop-Loss", f"${signal['sl']:.4f}", f"-{signal['sl_pct']}%")
-    m6.metric("Suggested Margin", f"${rec_margin} USDT")
+    if not rows:
+        return pd.DataFrame(), None, len(cands), status_msg
 
-    st.info(f"⏳ **Close By:** **{signal['close_pkt']}** ({signal['close_utc']} — ~{signal['hold_mins']}m) | {signal['astro_note']} | OB: {signal['ob_ratio']}x | RSI: {signal['rsi']}")
+    df = pd.DataFrame(rows).sort_values("Total Score", ascending=False).reset_index(drop=True)
 
-    if st.session_state.scanner_running:
-        akey = f"{signal['symbol']}_{signal['direction']}"
-        if time.time() - st.session_state.last_alert.get(akey, 0) > 900:
-            msg = (
-                f"⚡ *SCALP ({astro_mode.upper()})*\n"
-                f"🪙 `{signal['symbol']}` | {dir_icon} ({signal['score']}%)\n"
-                f"⚙️ *{signal['leverage']}x Isolated*\n"
-                f"💵 Entry: `${signal['entry']:.4f}`\n"
-                f"✅ TP1: `${signal['tp1']:.4f}` | TP2: `${signal['tp2']:.4f}`\n"
-                f"🛑 SL: `${signal['sl']:.4f}` (-{signal['sl_pct']}%)\n"
-                f"⏳ Close: {signal['close_pkt']}"
-            )
-            ok, _ = send_telegram(msg)
-            if ok:
-                st.session_state.last_alert[akey] = time.time()
-else:
-    st.warning("🔍 **NO QUALIFIED SCALP (>=60%) — SCANNING ORDER BOOKS ($0.10–$100)**")
-
-st.subheader("📊 Top 25 Active Futures Pairs ($0.10 – $100.00)")
-if df_display is not None and not df_display.empty:
-    st.dataframe(
-        df_display[["Symbol", "Price", "24h Vol ($M)", "Direction", "5m RSI", "OB Ratio", "Funding %", "Flow Score", "Astro Score", "Total Score", "Astro Note"]],
-        use_container_width=True,
-        hide_index=True
-    )
-
-if st.session_state.scanner_running:
-    time.sleep(20)
-    st.rerun()
+    sig = None
+    for _, best in df.head(1).iterrows():
+        sc = float(best["Total Score"])
+        if sc >= 60.0:
+            lev = 50 if sc >= 85 else (35 if sc >= 75 else 20)
+            ent = float(best["Price"])
+            sl_p = float(best["ATR %"]) / 100.0
+            sl = ent * (1 - sl_p) if best["Direction"] == "LONG" else ent * (1 + sl_p)
+            tp1 = ent * (1 + sl_p * 1.8) if best["Direction"] == "LONG" else ent * (1 - sl_p * 1.8)
+            tp2 = ent * (1 + sl_p * 3.2) if best["Direction"] == "LONG" else ent * (1 - sl_p * 3.2)
+            c_utc = datetime.now(pytz.UTC) + timedelta(minutes=ctx["mins"])
+            c_pkt = c_utc.astimezone(pytz.timezone("Asia/Karachi"))
+            sig = {
+                "symbol": best["Symbol"],
+                "direction": best["Direction"],
+                "score": sc,
+                "leverage": lev,
+                "entry": ent,
+                "tp1": tp1,
+                "tp2": tp2,
+                "sl": sl,
+                "sl_pct": round(sl_p * 100, 2),
+                "close_utc": c_utc.strftime("%H:%M:%S UTC"),
