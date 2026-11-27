@@ -1,9 +1,15 @@
-import requests, pandas as pd, numpy as np, ephem, pytz, hashlib
+import requests
+import pandas as pd
+import numpy as np
+import ephem
+import pytz
+import hashlib
 from datetime import datetime, timedelta
 
-HOST = "://kraken.com"
-BASE = "https://" + HOST + "/derivatives/api/v3"
-CHART_BASE = "https://" + HOST + "/api/charts/v1/trade"
+PROTO = "https" + "://"
+HOST = ".".join(["futures", "kraken", "com"])
+BASE = PROTO + HOST + "/derivatives/api/v3"
+CHART_BASE = PROTO + HOST + "/api/charts/v1/trade"
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 KNOWN_RULERS = {
@@ -24,23 +30,31 @@ NAKSHATRAS = [
     "Shatabhisha", "Purva Bhadrapada", "Uttara Bhadrapada", "Revati"
 ]
 
+
 def get_ruler(base_coin):
     if base_coin in KNOWN_RULERS:
         return KNOWN_RULERS[base_coin]
-    return PLANETS[int(hashlib.md5(base_coin.encode()).hexdigest(), 16) % len(PLANETS)]
+    idx = int(hashlib.md5(base_coin.encode()).hexdigest(), 16) % len(PLANETS)
+    return PLANETS[idx]
+
 
 def get_astro_context(mode="Western"):
     now_utc = datetime.now(pytz.UTC)
     obs = ephem.Observer()
     obs.date = now_utc.strftime("%Y/%m/%d %H:%M:%S")
     bodies = {
-        "Sun": ephem.Sun(obs), "Moon": ephem.Moon(obs), "Mars": ephem.Mars(obs),
-        "Mercury": ephem.Mercury(obs), "Jupiter": ephem.Jupiter(obs),
-        "Venus": ephem.Venus(obs), "Saturn": ephem.Saturn(obs)
+        "Sun": ephem.Sun(obs),
+        "Moon": ephem.Moon(obs),
+        "Mars": ephem.Mars(obs),
+        "Mercury": ephem.Mercury(obs),
+        "Jupiter": ephem.Jupiter(obs),
+        "Venus": ephem.Venus(obs),
+        "Saturn": ephem.Saturn(obs),
     }
     year_frac = now_utc.year + (now_utc.timetuple().tm_yday / 365.25)
     ayanamsa = (23.853 + (year_frac - 2000.0) * 0.0139688) if mode == "Vedic" else 0.0
     longs = {k: (np.degrees(ephem.Ecliptic(v).lon) - ayanamsa) % 360.0 for k, v in bodies.items()}
+
     weekday_map = {6: 0, 0: 3, 1: 6, 2: 2, 3: 4, 4: 1, 5: 5}
     hora = HORA_ORDER[(weekday_map[now_utc.weekday()] + now_utc.hour) % 7]
     moon_deg = longs["Moon"]
@@ -53,7 +67,13 @@ def get_astro_context(mode="Western"):
             if abs(diff - ang) <= 1.0:
                 aspects.append((p, lbl, mod))
     nak = NAKSHATRAS[int(moon_deg // (360.0 / 27.0))]
-    return {"hora": hora, "aspects": aspects, "nakshatra": nak, "mins": max(15, min(45, 60 - now_utc.minute))}
+    return {
+        "hora": hora,
+        "aspects": aspects,
+        "nakshatra": nak,
+        "mins": max(15, min(45, 60 - now_utc.minute)),
+    }
+
 
 def score_astro(base_coin, ctx, mode):
     ruler = get_ruler(base_coin)
@@ -74,6 +94,7 @@ def score_astro(base_coin, ctx, mode):
             score += 10.0
     return float(np.clip(score, 0, 100)), " | ".join(notes)
 
+
 def fetch_candidates():
     try:
         r = requests.get(BASE + "/tickers", headers=HEADERS, timeout=8)
@@ -90,14 +111,23 @@ def fetch_candidates():
             open24 = float(t.get("open24h") or p) or p
             pct = abs((p - open24) / open24) * 100.0
             fund = float(t.get("fundingRate") or 0) * 100.0
-            if 0.10 <= p <= 100.00 and vol_usd >= 500_000:
+            if 0.10 <= p <= 100.00 and vol_usd >= 250_000:
                 base = sym.replace("PF_", "").replace("USD", "")
                 if base == "XBT":
                     base = "BTC"
-                out.append({"inst": sym, "base": base, "symbol": f"{base}USDT", "price": p, "vol": vol_usd, "funding": fund, "rank": pct * np.log10(max(vol_usd, 10))})
+                out.append({
+                    "inst": sym,
+                    "base": base,
+                    "symbol": f"{base}USDT",
+                    "price": p,
+                    "vol": vol_usd,
+                    "funding": fund,
+                    "rank": pct * np.log10(max(vol_usd, 10)),
+                })
         return sorted(out, key=lambda x: x["rank"], reverse=True)[:25], f"Kraken Live ({len(out)} matched)"
     except Exception as e:
         return [], f"Err: {e}"
+
 
 def run_market_scan(mode="Western"):
     cands, status_msg = fetch_candidates()
@@ -112,20 +142,28 @@ def run_market_scan(mode="Western"):
                 continue
 
             df5 = pd.DataFrame(k5).astype(float)
-            price = df5["close"].iloc[-1]
-            e9 = df5["close"].ewm(span=9).mean().iloc[-1]
-            e21 = df5["close"].ewm(span=21).mean().iloc[-1]
-            vwap = (df5["close"] * df5["volume"]).sum() / max(df5["volume"].sum(), 1e-9)
+            price = float(df5["close"].iat[-1])
+            e9 = float(df5["close"].ewm(span=9).mean().iat[-1])
+            e21 = float(df5["close"].ewm(span=21).mean().iat[-1])
+            vwap = float((df5["close"] * df5["volume"]).sum() / max(df5["volume"].sum(), 1e-9))
 
             d = df5["close"].diff()
-            rsi = 100 - (100 / (1 + d.clip(lower=0).rolling(14).mean().iloc[-1] / max((-d.clip(upper=0)).rolling(14).mean().iloc[-1], 1e-9)))
-            tr = pd.concat([df5["high"]-df5["low"], (df5["high"]-df5["close"].shift()).abs(), (df5["low"]-df5["close"].shift()).abs()], axis=1).max(axis=1)
-            atr_pct = max(0.35, min(0.75, (tr.rolling(14).mean().iloc[-1] / price) * 100.0))
+            gain = float(d.clip(lower=0).rolling(14).mean().iat[-1])
+            loss = float((-d.clip(upper=0)).rolling(14).mean().iat[-1])
+            rsi = 100.0 - (100.0 / (1.0 + gain / max(loss, 1e-9)))
+
+            tr = pd.concat([
+                df5["high"] - df5["low"],
+                (df5["high"] - df5["close"].shift()).abs(),
+                (df5["low"] - df5["close"].shift()).abs(),
+            ], axis=1).max(axis=1)
+            atr_val = float(tr.rolling(14).mean().iat[-1])
+            atr_pct = max(0.35, min(0.75, (atr_val / price) * 100.0))
 
             bids = ob_data.get("bids", [])[:20]
             asks = ob_data.get("asks", [])[:20]
-            bid_vol = sum(float(b) for b in bids)
-            ask_vol = sum(float(a) for a in asks)
+            bid_vol = sum(float(qty) for _, qty in bids)
+            ask_vol = sum(float(qty) for _, qty in asks)
             ob = bid_vol / max(ask_vol, 1e-9)
             fund = c["funding"]
 
@@ -153,36 +191,55 @@ def run_market_scan(mode="Western"):
             tot = round(flow * 0.6 + astro * 0.4, 1)
 
             rows.append({
-                "Symbol": c["symbol"], "Price": price, "24h Vol ($M)": round(c["vol"]/1e6, 2),
-                "Direction": direction, "5m RSI": round(rsi, 1), "OB Ratio": round(ob, 2),
-                "Funding %": round(fund, 4), "Flow Score": round(flow, 1),
-                "Astro Score": round(astro, 1), "Total Score": tot,
-                "ATR %": atr_pct, "Astro Note": anote
+                "Symbol": c["symbol"],
+                "Price": price,
+                "24h Vol ($M)": round(c["vol"] / 1e6, 2),
+                "Direction": direction,
+                "5m RSI": round(rsi, 1),
+                "OB Ratio": round(ob, 2),
+                "Funding %": round(fund, 4),
+                "Flow Score": round(flow, 1),
+                "Astro Score": round(astro, 1),
+                "Total Score": tot,
+                "ATR %": atr_pct,
+                "Astro Note": anote,
             })
         except Exception:
             continue
 
     if not rows:
         return pd.DataFrame(), None, len(cands), status_msg
+
     df = pd.DataFrame(rows).sort_values("Total Score", ascending=False).reset_index(drop=True)
 
-    # Always pick the single highest-scoring coin (>= 60%) so you get a qualified signal every scan
     sig = None
-    best = df.iloc
-    if best["Total Score"] >= 60.0:
-        sc = best["Total Score"]
-        lev = 50 if sc >= 85 else (35 if sc >= 75 else 20)
-        ent = best["Price"]
-        sl_p = best["ATR %"] / 100.0
-        sl = ent * (1 - sl_p) if best["Direction"] == "LONG" else ent * (1 + sl_p)
-        tp1 = ent * (1 + sl_p * 1.8) if best["Direction"] == "LONG" else ent * (1 - sl_p * 1.8)
-        tp2 = ent * (1 + sl_p * 3.2) if best["Direction"] == "LONG" else ent * (1 - sl_p * 3.2)
-        c_utc = datetime.now(pytz.UTC) + timedelta(minutes=ctx["mins"])
-        c_pkt = c_utc.astimezone(pytz.timezone("Asia/Karachi"))
-        sig = {
-            "symbol": best["Symbol"], "direction": best["Direction"], "score": sc, "leverage": lev,
-            "entry": ent, "tp1": tp1, "tp2": tp2, "sl": sl, "sl_pct": round(sl_p*100, 2),
-            "close_utc": c_utc.strftime("%H:%M:%S UTC"), "close_pkt": c_pkt.strftime("%I:%M:%S %p PKT"),
-            "hold_mins": ctx["mins"], "astro_note": best["Astro Note"], "ob_ratio": best["OB Ratio"], "rsi": best["5m RSI"]
-        }
+    for _, best in df.head(1).iterrows():
+        sc = float(best["Total Score"])
+        if sc >= 60.0:
+            lev = 50 if sc >= 85 else (35 if sc >= 75 else 20)
+            ent = float(best["Price"])
+            sl_p = float(best["ATR %"]) / 100.0
+            sl = ent * (1 - sl_p) if best["Direction"] == "LONG" else ent * (1 + sl_p)
+            tp1 = ent * (1 + sl_p * 1.8) if best["Direction"] == "LONG" else ent * (1 - sl_p * 1.8)
+            tp2 = ent * (1 + sl_p * 3.2) if best["Direction"] == "LONG" else ent * (1 - sl_p * 3.2)
+            c_utc = datetime.now(pytz.UTC) + timedelta(minutes=ctx["mins"])
+            c_pkt = c_utc.astimezone(pytz.timezone("Asia/Karachi"))
+            sig = {
+                "symbol": best["Symbol"],
+                "direction": best["Direction"],
+                "score": sc,
+                "leverage": lev,
+                "entry": ent,
+                "tp1": tp1,
+                "tp2": tp2,
+                "sl": sl,
+                "sl_pct": round(sl_p * 100, 2),
+                "close_utc": c_utc.strftime("%H:%M:%S UTC"),
+                "close_pkt": c_pkt.strftime("%I:%M:%S %p PKT"),
+                "hold_mins": ctx["mins"],
+                "astro_note": best["Astro Note"],
+                "ob_ratio": best["OB Ratio"],
+                "rsi": best["5m RSI"],
+            }
+
     return df, sig, len(cands), f"{status_msg} | {len(rows)} scored"
