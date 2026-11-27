@@ -12,13 +12,23 @@ BASE = PROTO + HOST + "/derivatives/api/v3"
 CHART_BASE = PROTO + HOST + "/api/charts/v1/trade"
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
+# Exclude metals, forex, and tokenized stock/ETF perpetuals so ONLY pure crypto is scanned
+NON_CRYPTO_EXCLUDE = {
+    "XAG", "XAU", "XPT", "XPD", "EUR", "GBP", "JPY", "AUD", "CAD", "CHF", "NZD",
+    "SOXL", "SOXS", "TSLA", "NVDA", "AAPL", "MSFT", "AMZN", "GOOGL", "META",
+    "AMD", "COIN", "MSTR", "PLTR", "SPY", "QQQ", "IWM", "TLT", "GLD", "SLV",
+    "HOOD", "GME", "AMC", "NFLX", "INTC", "SMCI", "ARM", "MARA", "RIOT"
+}
+
 KNOWN_RULERS = {
     "SOL": "Sun", "XRP": "Jupiter", "SUI": "Moon", "NEAR": "Mercury",
     "LINK": "Saturn", "FET": "Uranus", "AVAX": "Mars", "DOT": "Jupiter",
     "ADA": "Venus", "UNI": "Mercury", "ATOM": "Uranus", "TRX": "Mars",
     "OM": "Saturn", "SSV": "Saturn", "HYPE": "Uranus", "APT": "Mercury",
     "ARB": "Uranus", "OP": "Mercury", "INJ": "Mars", "TIA": "Uranus",
-    "LTC": "Moon", "FIL": "Saturn", "RENDER": "Uranus", "SEI": "Moon"
+    "LTC": "Moon", "FIL": "Saturn", "RENDER": "Uranus", "SEI": "Moon",
+    "TON": "Mercury", "ENA": "Venus", "WLD": "Uranus", "ICP": "Saturn",
+    "ETC": "Saturn", "ALGO": "Mercury", "VET": "Venus", "RNDR": "Uranus"
 }
 PLANETS = ["Sun", "Moon", "Mars", "Mercury", "Jupiter", "Venus", "Saturn"]
 HORA_ORDER = ["Sun", "Venus", "Mercury", "Moon", "Saturn", "Jupiter", "Mars"]
@@ -106,15 +116,20 @@ def fetch_candidates():
             sym = t.get("symbol", "")
             if not sym.startswith("PF_") or not sym.endswith("USD"):
                 continue
+            base = sym.replace("PF_", "").replace("USD", "")
+            if base == "XBT":
+                base = "BTC"
+            # Skip non-crypto tickers (metals, forex, stocks/ETFs)
+            if base in NON_CRYPTO_EXCLUDE:
+                continue
+
             p = float(t.get("last") or 0)
             vol_usd = float(t.get("volumeQuote") or 0)
             open24 = float(t.get("open24h") or 0)
             pct = abs((p - open24) / open24) * 100.0 if open24 > 0 else 1.0
             fund = float(t.get("fundingRate") or 0) * 100.0
+
             if 0.10 <= p <= 100.00 and vol_usd >= 100_000:
-                base = sym.replace("PF_", "").replace("USD", "")
-                if base == "XBT":
-                    base = "BTC"
                 out.append({
                     "inst": sym,
                     "base": base,
@@ -124,7 +139,7 @@ def fetch_candidates():
                     "funding": fund,
                     "rank": pct * np.log10(max(vol_usd, 10)),
                 })
-        return sorted(out, key=lambda x: x["rank"], reverse=True)[:25], f"Kraken Live ({len(out)} matched)"
+        return sorted(out, key=lambda x: x["rank"], reverse=True)[:25], f"Crypto Only ({len(out)} matched)"
     except Exception as e:
         return [], f"Err: {e}"
 
@@ -235,13 +250,3 @@ def run_market_scan(mode="Western"):
                 "tp1": tp1,
                 "tp2": tp2,
                 "sl": sl,
-                "sl_pct": round(sl_p * 100, 2),
-                "close_utc": c_utc.strftime("%H:%M:%S UTC"),
-                "close_pkt": c_pkt.strftime("%I:%M:%S %p PKT"),
-                "hold_mins": ctx["mins"],
-                "astro_note": best["Astro Note"],
-                "ob_ratio": best["OB Ratio"],
-                "rsi": best["5m RSI"],
-            }
-
-    return df, sig, len(cands), f"{status_msg} | {len(rows)} scored"
