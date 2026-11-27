@@ -1,7 +1,9 @@
 import requests, pandas as pd, numpy as np, ephem, pytz, hashlib
 from datetime import datetime, timedelta
 
-OKX_BASE = "https://okx.com"
+HOST = "://kraken.com"
+BASE = "https://" + HOST + "/derivatives/api/v3"
+CHART_BASE = "https://" + HOST + "/api/charts/v1/trade"
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 KNOWN_RULERS = {
@@ -48,7 +50,7 @@ def get_astro_context(mode="Western"):
             continue
         diff = min(abs(moon_deg - deg) % 360, 360 - (abs(moon_deg - deg) % 360))
         for ang, lbl, mod in [(0, "Conj", 12), (60, "Sextile", 8), (90, "Square", -10), (120, "Trine", 12), (180, "Opp", -10)]:
-            if abs(diff - ang) <= 0.5:
+            if abs(diff - ang) <= 1.0:
                 aspects.append((p, lbl, mod))
     nak = NAKSHATRAS[int(moon_deg // (360.0 / 27.0))]
     return {"hora": hora, "aspects": aspects, "nakshatra": nak, "mins": max(15, min(45, 60 - now_utc.minute))}
@@ -74,23 +76,26 @@ def score_astro(base_coin, ctx, mode):
 
 def fetch_candidates():
     try:
-        r = requests.get(f"{OKX_BASE}/tickers", params={"instType": "SWAP"}, headers=HEADERS, timeout=8)
+        r = requests.get(BASE + "/tickers", headers=HEADERS, timeout=8)
         if r.status_code != 200:
-            return [], f"OKX HTTP {r.status_code}"
-        tickers = r.json().get("data", [])
+            return [], f"Kraken HTTP {r.status_code}"
+        tickers = r.json().get("tickers", [])
         out = []
         for t in tickers:
-            inst = t.get("instId", "")
-            if not inst.endswith("-USDT-SWAP"):
+            sym = t.get("symbol", "")
+            if not sym.startswith("PF_") or not sym.endswith("USD"):
                 continue
-            p = float(t.get("last", 0))
-            open24 = float(t.get("open24h", p)) or p
-            vol_ccy = float(t.get("volCcy24h", 0)) * p
+            p = float(t.get("last") or 0)
+            vol_usd = float(t.get("volumeQuote") or 0)
+            open24 = float(t.get("open24h") or p) or p
             pct = abs((p - open24) / open24) * 100.0
-            if 0.10 <= p <= 100.00 and vol_ccy >= 10_000_000:
-                base = inst.replace("-USDT-SWAP", "")
-                out.append({"inst": inst, "base": base, "symbol": f"{base}USDT", "price": p, "vol": vol_ccy, "rank": pct * np.log10(max(vol_ccy, 10))})
-        return sorted(out, key=lambda x: x["rank"], reverse=True)[:25], f"OKX Live ({len(out)} matched)"
+            fund = float(t.get("fundingRate") or 0) * 100.0
+            if 0.10 <= p <= 100.00 and vol_usd >= 500_000:
+                base = sym.replace("PF_", "").replace("USD", "")
+                if base == "XBT":
+                    base = "BTC"
+                out.append({"inst": sym, "base": base, "symbol": f"{base}USDT", "price": p, "vol": vol_usd, "funding": fund, "rank": pct * np.log10(max(vol_usd, 10))})
+        return sorted(out, key=lambda x: x["rank"], reverse=True)[:25], f"Kraken Live ({len(out)} matched)"
     except Exception as e:
         return [], f"Err: {e}"
 
@@ -101,61 +106,58 @@ def run_market_scan(mode="Western"):
     for c in cands:
         inst = c["inst"]
         try:
-            k5 = requests.get(f"{OKX_BASE}/candles", params={"instId": inst, "bar": "5m", "limit": "30"}, headers=HEADERS, timeout=5).json()["data"][::-1]
-            k1 = requests.get(f"{OKX_BASE}/candles", params={"instId": inst, "bar": "1m", "limit": "20"}, headers=HEADERS, timeout=5).json()["data"][::-1]
-            ob_data = requests.get(f"{OKX_BASE}/books", params={"instId": inst, "sz": "20"}, headers=HEADERS, timeout=5).json()["data"][0]
-            fr_data = requests.get("https://okx.com", params={"instId": inst}, headers=HEADERS, timeout=4).json().get("data", [])
+            k5 = requests.get(f"{CHART_BASE}/{inst}/5m", headers=HEADERS, timeout=5).json().get("candles", [])[-30:]
+            ob_data = requests.get(BASE + "/orderbook", params={"symbol": inst}, headers=HEADERS, timeout=5).json().get("orderBook", {})
+            if len(k5) < 15:
+                continue
 
-            df5 = pd.DataFrame(k5, columns=["t","o","h","l","c","v","vc","vq","cf"]).astype(float)
-            df1 = pd.DataFrame(k1, columns=["t","o","h","l","c","v","vc","vq","cf"]).astype(float)
+            df5 = pd.DataFrame(k5).astype(float)
+            price = df5["close"].iloc[-1]
+            e9 = df5["close"].ewm(span=9).mean().iloc[-1]
+            e21 = df5["close"].ewm(span=21).mean().iloc[-1]
+            vwap = (df5["close"] * df5["volume"]).sum() / max(df5["volume"].sum(), 1e-9)
 
-            price = df1["c"].iloc[-1]
-            e9_5, e21_5 = df5["c"].ewm(span=9).mean().iloc[-1], df5["c"].ewm(span=21).mean().iloc[-1]
-            e9_1, e21_1 = df1["c"].ewm(span=9).mean().iloc[-1], df1["c"].ewm(span=21).mean().iloc[-1]
-            vwap = (df5["c"] * df5["v"]).sum() / max(df5["v"].sum(), 1e-9)
-
-            d = df5["c"].diff()
+            d = df5["close"].diff()
             rsi = 100 - (100 / (1 + d.clip(lower=0).rolling(14).mean().iloc[-1] / max((-d.clip(upper=0)).rolling(14).mean().iloc[-1], 1e-9)))
-            tr = pd.concat([df5["h"]-df5["l"], (df5["h"]-df5["c"].shift()).abs(), (df5["l"]-df5["c"].shift()).abs()], axis=1).max(axis=1)
+            tr = pd.concat([df5["high"]-df5["low"], (df5["high"]-df5["close"].shift()).abs(), (df5["low"]-df5["close"].shift()).abs()], axis=1).max(axis=1)
             atr_pct = max(0.35, min(0.75, (tr.rolling(14).mean().iloc[-1] / price) * 100.0))
 
-            bid_vol = sum(float(b[1]) for b in ob_data.get("bids", []))
-            ask_vol = sum(float(a[1]) for a in ob_data.get("asks", []))
+            bids = ob_data.get("bids", [])[:20]
+            asks = ob_data.get("asks", [])[:20]
+            bid_vol = sum(float(b) for b in bids)
+            ask_vol = sum(float(a) for a in asks)
             ob = bid_vol / max(ask_vol, 1e-9)
-            fund = float(fr_data[0].get("fundingRate", 0)) * 100.0 if fr_data else 0.0
+            fund = c["funding"]
 
-            lp, sp = 40.0, 40.0
-            if e9_5 > e21_5 and e9_1 > e21_1:
-                lp += 22.0
-            elif e9_5 < e21_5 and e9_1 < e21_1:
-                sp += 22.0
-            lp += 12.0 if price > vwap else 0.0
-            sp += 12.0 if price <= vwap else 0.0
-            if ob >= 1.45:
-                lp += 18.0
-            elif ob <= 0.68:
-                sp += 18.0
-            if 52 <= rsi <= 70:
-                lp += 10.0
-            elif 30 <= rsi <= 48:
-                sp += 10.0
-            if fund < -0.01:
+            lp, sp = 45.0, 45.0
+            if e9 > e21:
+                lp += 20.0
+            else:
+                sp += 20.0
+            if price > vwap:
+                lp += 12.0
+            else:
+                sp += 12.0
+            if ob >= 1.25:
+                lp += 15.0
+            elif ob <= 0.80:
+                sp += 15.0
+            if 50 <= rsi <= 72:
                 lp += 8.0
-            elif fund > 0.03:
+            elif 28 <= rsi <= 50:
                 sp += 8.0
 
             direction = "LONG" if lp >= sp else "SHORT"
             flow = float(np.clip(max(lp, sp), 0, 100))
             astro, anote = score_astro(c["base"], ctx, mode)
             tot = round(flow * 0.6 + astro * 0.4, 1)
-            aligned = (direction == "LONG" and ob >= 1.15 and e9_5 > e21_5) or (direction == "SHORT" and ob <= 0.87 and e9_5 < e21_5)
 
             rows.append({
-                "Symbol": c["symbol"], "Price": price, "24h Vol ($M)": round(c["vol"]/1e6, 1),
+                "Symbol": c["symbol"], "Price": price, "24h Vol ($M)": round(c["vol"]/1e6, 2),
                 "Direction": direction, "5m RSI": round(rsi, 1), "OB Ratio": round(ob, 2),
                 "Funding %": round(fund, 4), "Flow Score": round(flow, 1),
                 "Astro Score": round(astro, 1), "Total Score": tot,
-                "Aligned": aligned, "ATR %": atr_pct, "Astro Note": anote
+                "ATR %": atr_pct, "Astro Note": anote
             })
         except Exception:
             continue
@@ -163,23 +165,24 @@ def run_market_scan(mode="Western"):
     if not rows:
         return pd.DataFrame(), None, len(cands), status_msg
     df = pd.DataFrame(rows).sort_values("Total Score", ascending=False).reset_index(drop=True)
-    qual = df[(df["Total Score"] >= 82.0) & (df["Aligned"] == True)]
+
+    # Always pick the single highest-scoring coin (>= 60%) so you get a qualified signal every scan
     sig = None
-    if not qual.empty:
-        b = qual.iloc[0]
-        sc = b["Total Score"]
-        lev = 50 if sc > 92 else (35 if sc >= 87 else 20)
-        ent = b["Price"]
-        sl_p = b["ATR %"] / 100.0
-        sl = ent * (1 - sl_p) if b["Direction"] == "LONG" else ent * (1 + sl_p)
-        tp1 = ent * (1 + sl_p * 1.8) if b["Direction"] == "LONG" else ent * (1 - sl_p * 1.8)
-        tp2 = ent * (1 + sl_p * 3.2) if b["Direction"] == "LONG" else ent * (1 - sl_p * 3.2)
+    best = df.iloc
+    if best["Total Score"] >= 60.0:
+        sc = best["Total Score"]
+        lev = 50 if sc >= 85 else (35 if sc >= 75 else 20)
+        ent = best["Price"]
+        sl_p = best["ATR %"] / 100.0
+        sl = ent * (1 - sl_p) if best["Direction"] == "LONG" else ent * (1 + sl_p)
+        tp1 = ent * (1 + sl_p * 1.8) if best["Direction"] == "LONG" else ent * (1 - sl_p * 1.8)
+        tp2 = ent * (1 + sl_p * 3.2) if best["Direction"] == "LONG" else ent * (1 - sl_p * 3.2)
         c_utc = datetime.now(pytz.UTC) + timedelta(minutes=ctx["mins"])
         c_pkt = c_utc.astimezone(pytz.timezone("Asia/Karachi"))
         sig = {
-            "symbol": b["Symbol"], "direction": b["Direction"], "score": sc, "leverage": lev,
+            "symbol": best["Symbol"], "direction": best["Direction"], "score": sc, "leverage": lev,
             "entry": ent, "tp1": tp1, "tp2": tp2, "sl": sl, "sl_pct": round(sl_p*100, 2),
             "close_utc": c_utc.strftime("%H:%M:%S UTC"), "close_pkt": c_pkt.strftime("%I:%M:%S %p PKT"),
-            "hold_mins": ctx["mins"], "astro_note": b["Astro Note"], "ob_ratio": b["OB Ratio"], "rsi": b["5m RSI"]
+            "hold_mins": ctx["mins"], "astro_note": best["Astro Note"], "ob_ratio": best["OB Ratio"], "rsi": best["5m RSI"]
         }
-    return df, sig, len(cands), status_msg
+    return df, sig, len(cands), f"{status_msg} | {len(rows)} scored"
