@@ -74,13 +74,11 @@ def run_market_scan(mode="Western"):
             price = float(df15["close"].iat[-1])
             if price <= 0: continue
 
-            # 1H Macro Trend Confirmation
             h1_e9 = float(df1h["close"].ewm(span=9).mean().iat[-1])
             h1_e21 = float(df1h["close"].ewm(span=21).mean().iat[-1])
             h1_bull = (price > h1_e21) and (h1_e9 >= h1_e21)
             h1_bear = (price < h1_e21) and (h1_e9 <= h1_e21)
 
-            # 15M Pullback & Momentum Indicators
             e9 = float(df15["close"].ewm(span=9).mean().iat[-1])
             e21 = float(df15["close"].ewm(span=21).mean().iat[-1])
             e50 = float(df15["close"].ewm(span=50).mean().iat[-1])
@@ -97,7 +95,6 @@ def run_market_scan(mode="Western"):
             pullback_long = m15_up and (42 <= rsi <= 58) and (price >= vwap * 0.995)
             pullback_short = m15_dn and (42 <= rsi <= 58) and (price <= vwap * 1.005)
 
-            # Multi-Timeframe (15m + 1h) Confluence Scoring
             lp = 25.0 + (22.0 if h1_bull else -15.0) + (18.0 if m15_up else 0.0) + (18.0 if pullback_long else 0.0) + (10.0 if ob >= 1.1 else 0.0) + (7.0 if c["fund"] <= 0.01 else 0.0)
             sp = 25.0 + (22.0 if h1_bear else -15.0) + (18.0 if m15_dn else 0.0) + (18.0 if pullback_short else 0.0) + (10.0 if ob <= 0.9 else 0.0) + (7.0 if c["fund"] >= -0.01 else 0.0)
 
@@ -118,11 +115,9 @@ def run_market_scan(mode="Western"):
     if not rows: return pd.DataFrame(), None, len(cands), "No setups"
     df = pd.DataFrame(rows).sort_values("Total Score", ascending=False).reset_index(drop=True)
 
-    # Strictly qualify ONLY coins where 15m + 1h trends agree AND score >= 68%
-    qual = df[(df["MTF_OK"] == True) & (df["Total Score"] >= 68.0)]
+    qual_list = df[(df["MTF_OK"] == True) & (df["Total Score"] >= 68.0)].to_dict("records")
     sig = None
-    if not qual.empty:
-        b = qual.iloc
+    for b in qual_list[:1]:
         sc = float(b["Total Score"])
         lev = 30 if sc >= 85 else (25 if sc >= 76 else 20)
         ent = float(b["Price"])
