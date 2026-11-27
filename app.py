@@ -13,13 +13,14 @@ def get_secret(key):
     return os.environ.get(key, "").strip()
 
 def send_telegram(msg):
-    token = get_secret("TELEGRAM_BOT_TOKEN").replace("https://telegram.org", "").replace("telegram.org", "").lstrip("/")
+    token = get_secret("TELEGRAM_BOT_TOKEN")
     chat_id = get_secret("TELEGRAM_CHAT_ID")
     if not token or not chat_id:
         return False, "Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID"
     try:
-        url = f"https://telegram.org{token}/sendMessage"
-        r = requests.post(url, json={"chat_id": chat_id, "text": msg, "parse_mode": "Markdown"}, timeout=6)
+        host = "api.telegram.org"
+        endpoint = f"https://{host}/bot{token}/sendMessage"
+        r = requests.post(endpoint, json={"chat_id": chat_id, "text": msg, "parse_mode": "Markdown"}, timeout=8)
         if r.status_code == 200:
             return True, "OK"
         return False, r.json().get("description", f"HTTP {r.status_code}")
@@ -52,10 +53,10 @@ with st.sidebar:
             st.error(f"Telegram Error: {info}")
 
 with st.spinner("Scanning Futures Order Books & Planetary Transits..."):
-    df_results, signal, matched = run_market_scan(astro_mode)
+    df_results, signal, matched, debug_msg = run_market_scan(astro_mode)
 
 now_pkt = datetime.now(pytz.timezone("Asia/Karachi")).strftime("%I:%M:%S %p PKT")
-st.caption(f"Last Scan: {now_pkt} | Filtered Liquid Pairs ($0.10–$100, >$15M Vol): Top {matched} analyzed | Mode: {astro_mode}")
+st.caption(f"Last Scan: {now_pkt} | Filtered Liquid Pairs ($0.10–$100): Top {matched} analyzed | Mode: {astro_mode} | Status: {debug_msg}")
 
 if signal:
     risk_usdt = wallet_usdt * (risk_pct / 100.0)
