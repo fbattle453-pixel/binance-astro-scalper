@@ -1,15 +1,16 @@
 import requests, pandas as pd, numpy as np, ephem, pytz, hashlib
 from datetime import datetime, timedelta
 
-BASE_URL = "https://mexc.com"
+OKX_BASE = "https://okx.com"
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 KNOWN_RULERS = {
-    "SOL_USDT": "Sun", "XRP_USDT": "Jupiter", "SUI_USDT": "Moon", "NEAR_USDT": "Mercury",
-    "LINK_USDT": "Saturn", "FET_USDT": "Uranus", "AVAX_USDT": "Mars", "DOT_USDT": "Jupiter",
-    "ADA_USDT": "Venus", "UNI_USDT": "Mercury", "ATOM_USDT": "Uranus", "TRX_USDT": "Mars",
-    "OM_USDT": "Saturn", "SSV_USDT": "Saturn", "HYPE_USDT": "Uranus", "APT_USDT": "Mercury",
-    "ARB_USDT": "Uranus", "OP_USDT": "Mercury", "INJ_USDT": "Mars", "TIA_USDT": "Uranus"
+    "SOL": "Sun", "XRP": "Jupiter", "SUI": "Moon", "NEAR": "Mercury",
+    "LINK": "Saturn", "FET": "Uranus", "AVAX": "Mars", "DOT": "Jupiter",
+    "ADA": "Venus", "UNI": "Mercury", "ATOM": "Uranus", "TRX": "Mars",
+    "OM": "Saturn", "SSV": "Saturn", "HYPE": "Uranus", "APT": "Mercury",
+    "ARB": "Uranus", "OP": "Mercury", "INJ": "Mars", "TIA": "Uranus",
+    "LTC": "Moon", "FIL": "Saturn", "RENDER": "Uranus", "SEI": "Moon"
 }
 PLANETS = ["Sun", "Moon", "Mars", "Mercury", "Jupiter", "Venus", "Saturn"]
 HORA_ORDER = ["Sun", "Venus", "Mercury", "Moon", "Saturn", "Jupiter", "Mars"]
@@ -21,10 +22,10 @@ NAKSHATRAS = [
     "Shatabhisha", "Purva Bhadrapada", "Uttara Bhadrapada", "Revati"
 ]
 
-def get_ruler(symbol):
-    if symbol in KNOWN_RULERS:
-        return KNOWN_RULERS[symbol]
-    return PLANETS[int(hashlib.md5(symbol.encode()).hexdigest(), 16) % len(PLANETS)]
+def get_ruler(base_coin):
+    if base_coin in KNOWN_RULERS:
+        return KNOWN_RULERS[base_coin]
+    return PLANETS[int(hashlib.md5(base_coin.encode()).hexdigest(), 16) % len(PLANETS)]
 
 def get_astro_context(mode="Western"):
     now_utc = datetime.now(pytz.UTC)
@@ -52,8 +53,8 @@ def get_astro_context(mode="Western"):
     nak = NAKSHATRAS[int(moon_deg // (360.0 / 27.0))]
     return {"hora": hora, "aspects": aspects, "nakshatra": nak, "mins": max(15, min(45, 60 - now_utc.minute))}
 
-def score_astro(symbol, ctx, mode):
-    ruler = get_ruler(symbol)
+def score_astro(base_coin, ctx, mode):
+    ruler = get_ruler(base_coin)
     score = 55.0
     notes = [f"Ruler:{ruler} | Hora:{ctx['hora']}"]
     if ctx["hora"] == ruler:
@@ -73,22 +74,23 @@ def score_astro(symbol, ctx, mode):
 
 def fetch_candidates():
     try:
-        r = requests.get(f"{BASE_URL}/ticker", headers=HEADERS, timeout=8)
+        r = requests.get(f"{OKX_BASE}/tickers", params={"instType": "SWAP"}, headers=HEADERS, timeout=8)
         if r.status_code != 200:
-            return [], f"Ticker HTTP {r.status_code}"
+            return [], f"OKX HTTP {r.status_code}"
         tickers = r.json().get("data", [])
         out = []
         for t in tickers:
-            sym = t.get("symbol", "")
-            if not sym.endswith("_USDT"):
+            inst = t.get("instId", "")
+            if not inst.endswith("-USDT-SWAP"):
                 continue
-            p = float(t.get("lastPrice", 0))
-            v = float(t.get("amount24", 0))
-            pct = abs(float(t.get("riseFallRate", 0))) * 100.0
-            fund = float(t.get("fundingRate", 0)) * 100.0
-            if 0.10 <= p <= 100.00 and v >= 10_000_000:
-                out.append({"symbol": sym, "price": p, "vol": v, "funding": fund, "rank": pct * np.log10(max(v, 10))})
-        return sorted(out, key=lambda x: x["rank"], reverse=True)[:25], f"OK ({len(out)} matched)"
+            p = float(t.get("last", 0))
+            open24 = float(t.get("open24h", p)) or p
+            vol_ccy = float(t.get("volCcy24h", 0)) * p
+            pct = abs((p - open24) / open24) * 100.0
+            if 0.10 <= p <= 100.00 and vol_ccy >= 10_000_000:
+                base = inst.replace("-USDT-SWAP", "")
+                out.append({"inst": inst, "base": base, "symbol": f"{base}USDT", "price": p, "vol": vol_ccy, "rank": pct * np.log10(max(vol_ccy, 10))})
+        return sorted(out, key=lambda x: x["rank"], reverse=True)[:25], f"OKX Live ({len(out)} matched)"
     except Exception as e:
         return [], f"Err: {e}"
 
@@ -97,14 +99,15 @@ def run_market_scan(mode="Western"):
     ctx = get_astro_context(mode)
     rows = []
     for c in cands:
-        sym = c["symbol"]
+        inst = c["inst"]
         try:
-            k5 = requests.get(f"{BASE_URL}/kline/{sym}", params={"interval": "Min5"}, headers=HEADERS, timeout=5).json()["data"]
-            k1 = requests.get(f"{BASE_URL}/kline/{sym}", params={"interval": "Min1"}, headers=HEADERS, timeout=5).json()["data"]
-            ob_data = requests.get(f"{BASE_URL}/depth/{sym}", params={"limit": 20}, headers=HEADERS, timeout=5).json()["data"]
+            k5 = requests.get(f"{OKX_BASE}/candles", params={"instId": inst, "bar": "5m", "limit": "30"}, headers=HEADERS, timeout=5).json()["data"][::-1]
+            k1 = requests.get(f"{OKX_BASE}/candles", params={"instId": inst, "bar": "1m", "limit": "20"}, headers=HEADERS, timeout=5).json()["data"][::-1]
+            ob_data = requests.get(f"{OKX_BASE}/books", params={"instId": inst, "sz": "20"}, headers=HEADERS, timeout=5).json()["data"][0]
+            fr_data = requests.get("https://okx.com", params={"instId": inst}, headers=HEADERS, timeout=4).json().get("data", [])
 
-            df5 = pd.DataFrame({"c": k5["close"][-30:], "h": k5["high"][-30:], "l": k5["low"][-30:], "v": k5["vol"][-30:]}).astype(float)
-            df1 = pd.DataFrame({"c": k1["close"][-20:]}).astype(float)
+            df5 = pd.DataFrame(k5, columns=["t","o","h","l","c","v","vc","vq","cf"]).astype(float)
+            df1 = pd.DataFrame(k1, columns=["t","o","h","l","c","v","vc","vq","cf"]).astype(float)
 
             price = df1["c"].iloc[-1]
             e9_5, e21_5 = df5["c"].ewm(span=9).mean().iloc[-1], df5["c"].ewm(span=21).mean().iloc[-1]
@@ -119,7 +122,7 @@ def run_market_scan(mode="Western"):
             bid_vol = sum(float(b[1]) for b in ob_data.get("bids", []))
             ask_vol = sum(float(a[1]) for a in ob_data.get("asks", []))
             ob = bid_vol / max(ask_vol, 1e-9)
-            fund = c["funding"]
+            fund = float(fr_data[0].get("fundingRate", 0)) * 100.0 if fr_data else 0.0
 
             lp, sp = 40.0, 40.0
             if e9_5 > e21_5 and e9_1 > e21_1:
@@ -143,13 +146,12 @@ def run_market_scan(mode="Western"):
 
             direction = "LONG" if lp >= sp else "SHORT"
             flow = float(np.clip(max(lp, sp), 0, 100))
-            astro, anote = score_astro(sym, ctx, mode)
+            astro, anote = score_astro(c["base"], ctx, mode)
             tot = round(flow * 0.6 + astro * 0.4, 1)
             aligned = (direction == "LONG" and ob >= 1.15 and e9_5 > e21_5) or (direction == "SHORT" and ob <= 0.87 and e9_5 < e21_5)
 
-            clean_sym = sym.replace("_USDT", "USDT")
             rows.append({
-                "Symbol": clean_sym, "Price": price, "24h Vol ($M)": round(c["vol"]/1e6, 1),
+                "Symbol": c["symbol"], "Price": price, "24h Vol ($M)": round(c["vol"]/1e6, 1),
                 "Direction": direction, "5m RSI": round(rsi, 1), "OB Ratio": round(ob, 2),
                 "Funding %": round(fund, 4), "Flow Score": round(flow, 1),
                 "Astro Score": round(astro, 1), "Total Score": tot,
@@ -164,7 +166,7 @@ def run_market_scan(mode="Western"):
     qual = df[(df["Total Score"] >= 82.0) & (df["Aligned"] == True)]
     sig = None
     if not qual.empty:
-        b = qual.iloc
+        b = qual.iloc[0]
         sc = b["Total Score"]
         lev = 50 if sc > 92 else (35 if sc >= 87 else 20)
         ent = b["Price"]
