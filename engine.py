@@ -1,14 +1,15 @@
 import requests, pandas as pd, numpy as np, ephem, pytz, hashlib
 from datetime import datetime, timedelta
 
-BASE_URL = "https://bybit.com"
+BASE_URL = "https://gateio.ws"
+HEADERS = {"Accept": "application/json", "User-Agent": "Mozilla/5.0"}
 
 KNOWN_RULERS = {
-    "SOLUSDT": "Sun", "XRPUSDT": "Jupiter", "SUIUSDT": "Moon", "NEARUSDT": "Mercury",
-    "LINKUSDT": "Saturn", "FETUSDT": "Uranus", "AVAXUSDT": "Mars", "DOTUSDT": "Jupiter",
-    "ADAUSDT": "Venus", "UNIUSDT": "Mercury", "ATOMUSDT": "Uranus", "TRXUSDT": "Mars",
-    "OMUSDT": "Saturn", "SSVUSDT": "Saturn", "HYPEUSDT": "Uranus", "APTUSDT": "Mercury",
-    "ARBUSDT": "Uranus", "OPUSDT": "Mercury", "INJUSDT": "Mars", "TIAUSDT": "Uranus"
+    "SOL_USDT": "Sun", "XRP_USDT": "Jupiter", "SUI_USDT": "Moon", "NEAR_USDT": "Mercury",
+    "LINK_USDT": "Saturn", "FET_USDT": "Uranus", "AVAX_USDT": "Mars", "DOT_USDT": "Jupiter",
+    "ADA_USDT": "Venus", "UNI_USDT": "Mercury", "ATOM_USDT": "Uranus", "TRX_USDT": "Mars",
+    "OM_USDT": "Saturn", "SSV_USDT": "Saturn", "HYPE_USDT": "Uranus", "APT_USDT": "Mercury",
+    "ARB_USDT": "Uranus", "OP_USDT": "Mercury", "INJ_USDT": "Mars", "TIA_USDT": "Uranus"
 }
 PLANETS = ["Sun", "Moon", "Mars", "Mercury", "Jupiter", "Venus", "Saturn"]
 HORA_ORDER = ["Sun", "Venus", "Mercury", "Moon", "Saturn", "Jupiter", "Mars"]
@@ -72,19 +73,19 @@ def score_astro(symbol, ctx, mode):
 
 def fetch_candidates():
     try:
-        r = requests.get(f"{BASE_URL}/v5/market/tickers", params={"category": "linear"}, timeout=8).json()
-        tickers = r.get("result", {}).get("list", [])
+        r = requests.get(f"{BASE_URL}/tickers", headers=HEADERS, timeout=8)
+        tickers = r.json()
         out = []
         for t in tickers:
-            sym = t.get("symbol", "")
-            if not sym.endswith("USDT"):
+            sym = t.get("contract", "")
+            if not sym.endswith("_USDT"):
                 continue
-            p = float(t.get("lastPrice", 0))
-            v = float(t.get("turnover24h", 0))
-            pct = abs(float(t.get("price24hPcnt", 0))) * 100.0
-            fund = float(t.get("fundingRate", 0)) * 100.0
-            if 0.10 <= p <= 100.00 and v >= 25_000_000:
-                out.append({"symbol": sym, "price": p, "vol": v, "funding": fund, "rank": pct * np.log10(v)})
+            p = float(t.get("last", 0))
+            v = float(t.get("volume_24h_settle", 0))
+            pct = abs(float(t.get("change_percentage", 0)))
+            fund = float(t.get("funding_rate", 0)) * 100.0
+            if 0.10 <= p <= 100.00 and v >= 15_000_000:
+                out.append({"symbol": sym, "price": p, "vol": v, "funding": fund, "rank": pct * np.log10(max(v, 10))})
         return sorted(out, key=lambda x: x["rank"], reverse=True)[:25]
     except Exception:
         return []
@@ -96,12 +97,12 @@ def run_market_scan(mode="Western"):
     for c in cands:
         sym = c["symbol"]
         try:
-            k5 = requests.get(f"{BASE_URL}/v5/market/kline", params={"category": "linear", "symbol": sym, "interval": "5", "limit": 30}, timeout=5).json()["result"]["list"][::-1]
-            k1 = requests.get(f"{BASE_URL}/v5/market/kline", params={"category": "linear", "symbol": sym, "interval": "1", "limit": 20}, timeout=5).json()["result"]["list"][::-1]
-            ob_data = requests.get(f"{BASE_URL}/v5/market/orderbook", params={"category": "linear", "symbol": sym, "limit": 25}, timeout=5).json()["result"]
+            k5 = requests.get(f"{BASE_URL}/candlesticks", params={"contract": sym, "interval": "5m", "limit": 30}, headers=HEADERS, timeout=5).json()
+            k1 = requests.get(f"{BASE_URL}/candlesticks", params={"contract": sym, "interval": "1m", "limit": 20}, headers=HEADERS, timeout=5).json()
+            ob_data = requests.get(f"{BASE_URL}/order_book", params={"contract": sym, "limit": 20}, headers=HEADERS, timeout=5).json()
 
-            df5 = pd.DataFrame(k5, columns=["t","o","h","l","c","v","to"]).astype(float)
-            df1 = pd.DataFrame(k1, columns=["t","o","h","l","c","v","to"]).astype(float)
+            df5 = pd.DataFrame(k5).astype(float)
+            df1 = pd.DataFrame(k1).astype(float)
 
             price = df1["c"].iloc[-1]
             e9_5, e21_5 = df5["c"].ewm(span=9).mean().iloc[-1], df5["c"].ewm(span=21).mean().iloc[-1]
@@ -113,8 +114,8 @@ def run_market_scan(mode="Western"):
             tr = pd.concat([df5["h"]-df5["l"], (df5["h"]-df5["c"].shift()).abs(), (df5["l"]-df5["c"].shift()).abs()], axis=1).max(axis=1)
             atr_pct = max(0.35, min(0.75, (tr.rolling(14).mean().iloc[-1] / price) * 100.0))
 
-            bid_vol = sum(float(b[1]) for b in ob_data.get("b", []))
-            ask_vol = sum(float(a[1]) for a in ob_data.get("a", []))
+            bid_vol = sum(abs(float(b["s"])) for b in ob_data.get("bids", []))
+            ask_vol = sum(abs(float(a["s"])) for a in ob_data.get("asks", []))
             ob = bid_vol / max(ask_vol, 1e-9)
             fund = c["funding"]
 
@@ -144,8 +145,9 @@ def run_market_scan(mode="Western"):
             tot = round(flow * 0.6 + astro * 0.4, 1)
             aligned = (direction == "LONG" and ob >= 1.15 and e9_5 > e21_5) or (direction == "SHORT" and ob <= 0.87 and e9_5 < e21_5)
 
+            clean_sym = sym.replace("_USDT", "USDT")
             rows.append({
-                "Symbol": sym, "Price": price, "24h Vol ($M)": round(c["vol"]/1e6, 1),
+                "Symbol": clean_sym, "Price": price, "24h Vol ($M)": round(c["vol"]/1e6, 1),
                 "Direction": direction, "5m RSI": round(rsi, 1), "OB Ratio": round(ob, 2),
                 "Funding %": round(fund, 4), "Flow Score": round(flow, 1),
                 "Astro Score": round(astro, 1), "Total Score": tot,
