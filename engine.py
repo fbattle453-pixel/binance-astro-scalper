@@ -65,48 +65,64 @@ def run_market_scan(mode="Western"):
     for c in cands:
         try:
             k15 = requests.get(f"{CHART_BASE}/{c['inst']}/15m", headers=HEADERS, timeout=5).json().get("candles", [])[-55:]
+            k1h = requests.get(f"{CHART_BASE}/{c['inst']}/1h", headers=HEADERS, timeout=5).json().get("candles", [])[-30:]
             obd = requests.get(BASE + "/orderbook", params={"symbol": c["inst"]}, headers=HEADERS, timeout=5).json().get("orderBook", {})
-            if len(k15) < 30: continue
-            df = pd.DataFrame(k15).astype(float)
-            price = float(df["close"].iat[-1])
+            if len(k15) < 30 or len(k1h) < 20: continue
+
+            df15 = pd.DataFrame(k15).astype(float)
+            df1h = pd.DataFrame(k1h).astype(float)
+            price = float(df15["close"].iat[-1])
             if price <= 0: continue
 
-            e9 = float(df["close"].ewm(span=9).mean().iat[-1])
-            e21 = float(df["close"].ewm(span=21).mean().iat[-1])
-            e50 = float(df["close"].ewm(span=50).mean().iat[-1])
-            vwap = float((df["close"] * df["volume"]).sum() / max(df["volume"].sum(), 1e-9))
+            # 1H Macro Trend Confirmation
+            h1_e9 = float(df1h["close"].ewm(span=9).mean().iat[-1])
+            h1_e21 = float(df1h["close"].ewm(span=21).mean().iat[-1])
+            h1_bull = (price > h1_e21) and (h1_e9 >= h1_e21)
+            h1_bear = (price < h1_e21) and (h1_e9 <= h1_e21)
 
-            d = df["close"].diff()
+            # 15M Pullback & Momentum Indicators
+            e9 = float(df15["close"].ewm(span=9).mean().iat[-1])
+            e21 = float(df15["close"].ewm(span=21).mean().iat[-1])
+            e50 = float(df15["close"].ewm(span=50).mean().iat[-1])
+            vwap = float((df15["close"] * df15["volume"]).sum() / max(df15["volume"].sum(), 1e-9))
+
+            d = df15["close"].diff()
             rsi = 100.0 - (100.0 / (1.0 + float(d.clip(lower=0).rolling(14).mean().iat[-1]) / max(float((-d.clip(upper=0)).rolling(14).mean().iat[-1]), 1e-9)))
-            tr = pd.concat([df["high"]-df["low"], (df["high"]-df["close"].shift()).abs(), (df["low"]-df["close"].shift()).abs()], axis=1).max(axis=1)
+            tr = pd.concat([df15["high"]-df15["low"], (df15["high"]-df15["close"].shift()).abs(), (df15["low"]-df15["close"].shift()).abs()], axis=1).max(axis=1)
             atr_pct = (float(tr.rolling(14).mean().iat[-1]) / price) * 100.0
             ob = sum(float(q) for _, q in obd.get("bids", [])[:20]) / max(sum(float(q) for _, q in obd.get("asks", [])[:20]), 1e-9)
 
-            uptrend = e9 > e21 and price > e50
-            downtrend = e9 < e21 and price < e50
-            pullback_long = uptrend and (42 <= rsi <= 58) and (price >= vwap * 0.995)
-            pullback_short = downtrend and (42 <= rsi <= 58) and (price <= vwap * 1.005)
+            m15_up = e9 > e21 and price > e50
+            m15_dn = e9 < e21 and price < e50
+            pullback_long = m15_up and (42 <= rsi <= 58) and (price >= vwap * 0.995)
+            pullback_short = m15_dn and (42 <= rsi <= 58) and (price <= vwap * 1.005)
 
-            lp = 35.0 + (22.0 if uptrend else 0.0) + (20.0 if pullback_long else 0.0) + (10.0 if ob >= 1.1 else 0.0) + (8.0 if c["fund"] <= 0.01 else 0.0)
-            sp = 35.0 + (22.0 if downtrend else 0.0) + (20.0 if pullback_short else 0.0) + (10.0 if ob <= 0.9 else 0.0) + (8.0 if c["fund"] >= -0.01 else 0.0)
+            # Multi-Timeframe (15m + 1h) Confluence Scoring
+            lp = 25.0 + (22.0 if h1_bull else -15.0) + (18.0 if m15_up else 0.0) + (18.0 if pullback_long else 0.0) + (10.0 if ob >= 1.1 else 0.0) + (7.0 if c["fund"] <= 0.01 else 0.0)
+            sp = 25.0 + (22.0 if h1_bear else -15.0) + (18.0 if m15_dn else 0.0) + (18.0 if pullback_short else 0.0) + (10.0 if ob <= 0.9 else 0.0) + (7.0 if c["fund"] >= -0.01 else 0.0)
 
             if rsi > 68: lp -= 25.0
             if rsi < 32: sp -= 25.0
 
             direction = "LONG" if lp >= sp else "SHORT"
+            mtf_ok = (direction == "LONG" and h1_bull and m15_up) or (direction == "SHORT" and h1_bear and m15_dn)
             flow = float(np.clip(max(lp, sp), 0, 100))
             astro, anote = score_astro(c["base"], ctx, mode)
             total = round(min(99.0, flow * 0.70 + astro * 0.30), 1)
+            mtf_tag = "15m+1h Aligned" if mtf_ok else "MTF Conflict"
 
-            rows.append({"Symbol": c["sym"], "Price": price, "24h Vol ($M)": round(c["vol"]/1e6, 2), "Direction": direction, "5m RSI": round(rsi, 1), "OB Ratio": round(ob, 2), "Funding %": round(fund, 4), "Flow Score": round(flow, 1), "Astro Score": round(astro, 1), "Total Score": total, "ATR %": atr_pct, "Astro Note": f"15m Pullback | {anote}"})
+            rows.append({"Symbol": c["sym"], "Price": price, "24h Vol ($M)": round(c["vol"]/1e6, 2), "Direction": direction, "5m RSI": round(rsi, 1), "OB Ratio": round(ob, 2), "Funding %": round(c["fund"], 4), "Flow Score": round(flow, 1), "Astro Score": round(astro, 1), "Total Score": total, "MTF_OK": mtf_ok, "ATR %": atr_pct, "Astro Note": f"{mtf_tag} | {anote}"})
         except Exception:
             continue
 
     if not rows: return pd.DataFrame(), None, len(cands), "No setups"
     df = pd.DataFrame(rows).sort_values("Total Score", ascending=False).reset_index(drop=True)
+
+    # Strictly qualify ONLY coins where 15m + 1h trends agree AND score >= 68%
+    qual = df[(df["MTF_OK"] == True) & (df["Total Score"] >= 68.0)]
     sig = None
-    b = df.iloc
-    if float(b["Total Score"]) >= 68.0:
+    if not qual.empty:
+        b = qual.iloc
         sc = float(b["Total Score"])
         lev = 30 if sc >= 85 else (25 if sc >= 76 else 20)
         ent = float(b["Price"])
@@ -117,4 +133,4 @@ def run_market_scan(mode="Western"):
         c_utc = datetime.now(pytz.UTC) + timedelta(minutes=ctx["mins"])
         c_pkt = c_utc.astimezone(pytz.timezone("Asia/Karachi"))
         sig = dict(symbol=b["Symbol"], direction=b["Direction"], score=sc, leverage=lev, entry=ent, tp1=tp1, tp2=tp2, sl=sl, sl_pct=round(sl_p*100, 2), close_utc=c_utc.strftime("%H:%M:%S UTC"), close_pkt=c_pkt.strftime("%I:%M:%S %p PKT"), hold_mins=ctx["mins"], astro_note=b["Astro Note"], ob_ratio=b["OB Ratio"], rsi=b["5m RSI"])
-    return df, sig, len(cands), f"15m Pullback 2.2%-3.2% ({len(rows)} scored)"
+    return df, sig, len(cands), f"15m+1h MTF Filter ({len(rows)} scored)"
