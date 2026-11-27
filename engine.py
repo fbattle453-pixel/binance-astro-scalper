@@ -108,10 +108,10 @@ def fetch_candidates():
                 continue
             p = float(t.get("last") or 0)
             vol_usd = float(t.get("volumeQuote") or 0)
-            open24 = float(t.get("open24h") or p) or p
-            pct = abs((p - open24) / open24) * 100.0
+            open24 = float(t.get("open24h") or 0)
+            pct = abs((p - open24) / open24) * 100.0 if open24 > 0 else 1.0
             fund = float(t.get("fundingRate") or 0) * 100.0
-            if 0.10 <= p <= 100.00 and vol_usd >= 250_000:
+            if 0.10 <= p <= 100.00 and vol_usd >= 100_000:
                 base = sym.replace("PF_", "").replace("USD", "")
                 if base == "XBT":
                     base = "BTC"
@@ -143,6 +143,8 @@ def run_market_scan(mode="Western"):
 
             df5 = pd.DataFrame(k5).astype(float)
             price = float(df5["close"].iat[-1])
+            if price <= 0:
+                continue
             e9 = float(df5["close"].ewm(span=9).mean().iat[-1])
             e21 = float(df5["close"].ewm(span=21).mean().iat[-1])
             vwap = float((df5["close"] * df5["volume"]).sum() / max(df5["volume"].sum(), 1e-9))
