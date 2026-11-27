@@ -242,7 +242,7 @@ def run_market_scan(mode="Western"):
             tp2 = ent * (1 + sl_p * 3.2) if best["Direction"] == "LONG" else ent * (1 - sl_p * 3.2)
             c_utc = datetime.now(pytz.UTC) + timedelta(minutes=ctx["mins"])
             c_pkt = c_utc.astimezone(pytz.timezone("Asia/Karachi"))
-            sig = {
+                        sig = {
                 "symbol": best["Symbol"],
                 "direction": best["Direction"],
                 "score": sc,
@@ -253,3 +253,11 @@ def run_market_scan(mode="Western"):
                 "sl": sl,
                 "sl_pct": round(sl_p * 100, 2),
                 "close_utc": c_utc.strftime("%H:%M:%S UTC"),
+                "close_pkt": c_pkt.strftime("%I:%M:%S %p PKT"),
+                "hold_mins": ctx["mins"],
+                "astro_note": best["Astro Note"],
+                "ob_ratio": best["OB Ratio"],
+                "rsi": best["5m RSI"],
+            }
+
+    return df, sig, len(cands), f"{status_msg} | {len(rows)} scored"
