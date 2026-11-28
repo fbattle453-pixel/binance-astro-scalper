@@ -24,11 +24,8 @@ def send_telegram(msg):
     if not token or not chat_id:
         return False, "Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID"
     try:
-        slash = chr(47)
-        colon = chr(58)
-        dot = chr(46)
-        host = dot.join(["api", "telegram", "org"])
-        endpoint = "https" + colon + slash + slash + host + "/bot" + token + "/sendMessage"
+        host = chr(46).join(["api", "telegram", "org"])
+        endpoint = "https" + chr(58) + chr(47) + chr(47) + host + "/bot" + token + "/sendMessage"
         r = requests.post(endpoint, json={"chat_id": chat_id, "text": msg, "parse_mode": "Markdown"}, timeout=8)
         if r.status_code == 200:
             return True, "OK"
@@ -37,10 +34,14 @@ def send_telegram(msg):
         return False, str(e)
 
 
+def fmt_price(val):
+    return f"${val:.5f}" if val < 1.0 else f"${val:.4f}"
+
+
 if "last_alert" not in st.session_state:
     st.session_state.last_alert = {}
 if "scanner_running" not in st.session_state:
-    st.session_state.scanner_running = True
+    st.session_state.scanner_running = False
 if "saved_df" not in st.session_state:
     st.session_state.saved_df = None
 if "saved_signal" not in st.session_state:
@@ -48,16 +49,17 @@ if "saved_signal" not in st.session_state:
 if "saved_matched" not in st.session_state:
     st.session_state.saved_matched = 0
 if "saved_status" not in st.session_state:
-    st.session_state.saved_status = "Waiting for first scan..."
+    st.session_state.saved_status = "Ready — Click Start Scanner when you want to trade"
 if "saved_time" not in st.session_state:
     st.session_state.saved_time = "—"
 
-st.title("⚡ Pure-Crypto Astro Scalp Scanner ($0.10 – $100)")
+st.title("⚡ Pure-Crypto Astro Scalp Scanner ($0.001 – $200)")
 
 c1, c2, c3, c4 = st.columns([0.8, 0.8, 1.5, 1.1])
 with c1:
     if st.button("▶️ Start Scanner", use_container_width=True, type="primary" if not st.session_state.scanner_running else "secondary"):
         st.session_state.scanner_running = True
+        st.session_state.last_alert = {}
         st.rerun()
 with c2:
     if st.button("⏹️ Stop Scanner", use_container_width=True, type="primary" if st.session_state.scanner_running else "secondary"):
@@ -67,23 +69,23 @@ with c3:
     astro_mode = st.radio("Astrology System:", ["Western", "Vedic"], horizontal=True)
 with c4:
     tg_ready = bool(get_secret("TELEGRAM_BOT_TOKEN") and get_secret("TELEGRAM_CHAT_ID"))
-    state_badge = "🟢 RUNNING (20s)" if st.session_state.scanner_running else "⏸️ PAUSED (FROZEN)"
+    state_badge = "🟢 SCANNING (20s)" if st.session_state.scanner_running else "⏸️ STANDBY / FROZEN"
     st.markdown(f"**Status:** {state_badge}  \n**Telegram:** {'✅ Connected' if tg_ready else '⚠️ Missing Secrets'}")
 
 with st.sidebar:
-    st.header("🛡️ 20x–50x Position Calculator")
+    st.header("🛡️ 20x–35x Position Calculator")
     wallet_usdt = st.number_input("Futures Wallet (USDT)", min_value=10.0, value=500.0, step=50.0)
     risk_pct = st.slider("Max Risk per Scalp (%)", min_value=0.5, max_value=5.0, value=2.0, step=0.5)
     st.divider()
     if st.button("📲 Send Test Telegram Alert", use_container_width=True):
-        ok, info = send_telegram("✅ *Test Alert:* Pure-Crypto Astro Scalper is connected!")
+        ok, info = send_telegram("✅ *Test Alert:* Pure-Crypto Astro Scalper ($0.001–$200) is ready!")
         if ok:
             st.success("Sent! Check your Telegram.")
         else:
             st.error(f"Telegram Error: {info}")
 
-if st.session_state.scanner_running or st.session_state.saved_df is None:
-    with st.spinner("Scanning Pure-Crypto Order Books & Planetary Transits..."):
+if st.session_state.scanner_running:
+    with st.spinner("Scanning BTC Regime, Liquidity Sweeps & Planetary Transits..."):
         df_results, signal, matched, debug_msg = run_market_scan(astro_mode)
         if not df_results.empty:
             st.session_state.saved_df = df_results
@@ -91,8 +93,10 @@ if st.session_state.scanner_running or st.session_state.saved_df is None:
             st.session_state.saved_matched = matched
             st.session_state.saved_status = debug_msg
             st.session_state.saved_time = datetime.now(pytz.timezone("Asia/Karachi")).strftime("%I:%M:%S %p PKT")
+elif st.session_state.saved_df is None:
+    st.info("👋 **Ready to Trade:** Choose **Western** or **Vedic** mode above and click **▶️ Start Scanner** to scan the market ($0.001–$200) and get your signal.")
 else:
-    st.info("⏸️ **Scanner Stopped:** Holding last qualified signal on screen. Click **▶️ Start Scanner** above to resume live scanning.")
+    st.info("⏸️ **Scanner Stopped:** Holding your last qualified signal on screen. Click **▶️ Start Scanner** anytime for a fresh scan.")
 
 df_display = st.session_state.saved_df
 signal = st.session_state.saved_signal
@@ -100,7 +104,7 @@ matched = st.session_state.saved_matched
 debug_msg = st.session_state.saved_status
 last_time = st.session_state.saved_time
 
-st.caption(f"Last Scan: {last_time} | Filtered Crypto Pairs ($0.10–$100): Top {matched} analyzed | Mode: {astro_mode} | Status: {debug_msg}")
+st.caption(f"Last Scan: {last_time} | Filtered Crypto Pairs ($0.001–$200): Top {matched} analyzed | Mode: {astro_mode} | Status: {debug_msg}")
 
 if signal:
     risk_usdt = wallet_usdt * (risk_pct / 100.0)
@@ -109,11 +113,11 @@ if signal:
     st.success(f"### 🎯 TOP QUALIFIED CRYPTO SCALP: **{signal['symbol']}** — {dir_icon} ({signal['score']}%)")
 
     m1, m2, m3, m4, m5, m6 = st.columns(6)
-    m1.metric("Entry Price", f"${signal['entry']:.4f}")
+    m1.metric("Entry Price", fmt_price(signal["entry"]))
     m2.metric("Leverage (Isolated)", f"{signal['leverage']}x")
-    m3.metric("TP 1 (50%)", f"${signal['tp1']:.4f}")
-    m4.metric("TP 2 (Runner)", f"${signal['tp2']:.4f}")
-    m5.metric("Stop-Loss", f"${signal['sl']:.4f}", f"-{signal['sl_pct']}%")
+    m3.metric("TP 1 (50%)", fmt_price(signal["tp1"]))
+    m4.metric("TP 2 (Runner)", fmt_price(signal["tp2"]))
+    m5.metric("Stop-Loss", fmt_price(signal["sl"]), f"-{signal['sl_pct']}%")
     m6.metric("Suggested Margin", f"${rec_margin} USDT")
 
     st.info(f"⏳ **Close By:** **{signal['close_pkt']}** ({signal['close_utc']} — ~{signal['hold_mins']}m) | {signal['astro_note']} | OB: {signal['ob_ratio']}x | RSI: {signal['rsi']}")
@@ -125,19 +129,17 @@ if signal:
                 f"⚡ *CRYPTO SCALP ({astro_mode.upper()})*\n"
                 f"🪙 `{signal['symbol']}` | {dir_icon} ({signal['score']}%)\n"
                 f"⚙️ *{signal['leverage']}x Isolated*\n"
-                f"💵 Entry: `${signal['entry']:.4f}`\n"
-                f"✅ TP1: `${signal['tp1']:.4f}` | TP2: `${signal['tp2']:.4f}`\n"
-                f"🛑 SL: `${signal['sl']:.4f}` (-{signal['sl_pct']}%)\n"
+                f"💵 Entry: `{fmt_price(signal['entry'])}`\n"
+                f"✅ TP1: `{fmt_price(signal['tp1'])}` | TP2: `{fmt_price(signal['tp2'])}`\n"
+                f"🛑 SL: `{fmt_price(signal['sl'])}` (-{signal['sl_pct']}%)\n"
                 f"⏳ Close: {signal['close_pkt']}"
             )
             ok, _ = send_telegram(msg)
             if ok:
                 st.session_state.last_alert[akey] = time.time()
-else:
-    st.warning("🔍 **NO QUALIFIED SCALP (>=60%) — SCANNING CRYPTO ORDER BOOKS ($0.10–$100)**")
 
-st.subheader("📊 Top 25 Active Crypto Futures Pairs ($0.10 – $100.00)")
 if df_display is not None and not df_display.empty:
+    st.subheader("📊 Top 25 Active Crypto Futures Pairs ($0.001 – $200.00)")
     st.dataframe(
         df_display[["Symbol", "Price", "24h Vol ($M)", "Direction", "5m RSI", "OB Ratio", "Funding %", "Flow Score", "Astro Score", "Total Score", "Astro Note"]],
         use_container_width=True,
