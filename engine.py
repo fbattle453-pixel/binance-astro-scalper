@@ -163,4 +163,10 @@ def run_market_scan(mode="Western"):
         sl = ent * (1 - sl_p) if b["Direction"] == "LONG" else ent * (1 + sl_p)
         tp1 = ent * (1 + tp1_p) if b["Direction"] == "LONG" else ent * (1 - tp1_p)
         tp2 = ent * (1 + tp2_p) if b["Direction"] == "LONG" else ent * (1 - tp2_p)
+        est_candles = int(np.clip(round((tp1_p * 100.0) / max(atr * 0.65, 0.15)), 3, 12))
+        hold_mins = est_candles * 5
+        c_utc = datetime.now(pytz.UTC) + timedelta(minutes=hold_mins)
+        c_pkt = c_utc.astimezone(pytz.timezone("Asia/Karachi"))
+        sig = dict(symbol=b["Symbol"], direction=b["Direction"], score=sc, leverage=lev, entry=ent, tp1=tp1, tp2=tp2, sl=sl, sl_pct=round(sl_p*100, 2), close_utc=c_utc.strftime("%H:%M:%S UTC"), close_pkt=c_pkt.strftime("%I:%M:%S %p PKT"), hold_mins=hold_mins, astro_note=b["Astro Note"], ob_ratio=b["OB Ratio"], rsi=b["5m RSI"])
+    return df, sig, len(cands), f"BTC:{btc_state} | $0.001-$200 ({len(rows)} scored)"
 
