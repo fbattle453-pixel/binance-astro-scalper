@@ -1,11 +1,19 @@
 import requests, pandas as pd, numpy as np, pytz
 from datetime import datetime, timedelta
-from astro_core import EXCLUDE, get_astro, score_astro
+from astro_core import get_astro, score_astro
 
 PROTO = "https" + chr(58) + chr(47) + chr(47)
 BASE = PROTO + chr(46).join(["futures", "kraken", "com"]) + "/derivatives/api/v3"
 CC_BASE = PROTO + chr(46).join(["min-api", "cryptocompare", "com"])
 HEADERS = {"User-Agent": "Mozilla/5.0"}
+
+BINANCE_FUTURES_COINS = {
+    "SOL", "XRP", "SUI", "NEAR", "LINK", "FET", "AVAX", "DOT", "ADA", "UNI",
+    "ATOM", "TRX", "OM", "APT", "ARB", "OP", "INJ", "TIA", "LTC", "FIL",
+    "RENDER", "SEI", "DOGE", "PEPE", "WIF", "BONK", "AAVE", "TAO", "HYPE",
+    "ENA", "WLD", "ICP", "ETC", "ALGO", "VET", "TON", "GALA", "SAND", "MANA",
+    "CRV", "DYDX", "RUNE", "ORDI", "JUP", "PYTH", "STRK", "ZK", "NOT", "BOME"
+}
 
 def last_val(series):
     return float(series.to_list().pop())
@@ -39,14 +47,14 @@ def run_market_scan(mode="Western"):
             if not sym.startswith("PF_") or not sym.endswith("USD"):
                 continue
             base = sym.replace("PF_", "").replace("USD", "")
-            if base in EXCLUDE or base in ("BTC", "XBT"):
+            if base not in BINANCE_FUTURES_COINS:
                 continue
             p = float(t.get("last") or 0)
             vol = float(t.get("volumeQuote") or 0)
             op = float(t.get("open24h") or 0)
             pct = abs((p - op) / op) * 100.0 if op > 0 else 2.0
             fund = float(t.get("fundingRate") or 0) * 100.0
-            if 0.001 <= p <= 200.00 and vol >= 1_000_000 and 1.0 <= pct <= 12.0:
+            if 0.001 <= p <= 200.00 and vol >= 250_000 and 1.0 <= pct <= 12.0:
                 cands.append({"inst": sym, "base": base, "sym": f"{base}USDT", "vol": vol, "fund": fund, "rank": pct * np.log10(max(vol, 10))})
         cands = list(sorted(cands, key=lambda x: x["rank"], reverse=True))[:25]
     except Exception as e:
@@ -117,4 +125,4 @@ def run_market_scan(mode="Western"):
         c_utc = datetime.now(pytz.UTC) + timedelta(minutes=45)
         c_pkt = c_utc.astimezone(pytz.timezone("Asia/Karachi"))
         sig = dict(symbol=b["Symbol"], direction=b["Direction"], score=sc, leverage=lev, entry=ent, tp1=tp1, tp2=tp2, sl=sl, sl_pct=round(sl_p * 100, 2), close_utc=c_utc.strftime("%H:%M:%S UTC"), close_pkt=c_pkt.strftime("%I:%M:%S %p PKT"), hold_mins=45, astro_note=b["Astro Note"], ob_ratio=b["OB Ratio"], rsi=b["5m RSI"])
-    return df, sig, len(cands), f"BTC:{btc_state} | USDT Sync ({len(rows)} scored)"
+    return df, sig, len(cands), f"BTC:{btc_state} | Binance USDT Sync ({len(rows)} scored)"
