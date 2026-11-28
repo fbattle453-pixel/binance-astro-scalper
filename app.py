@@ -35,7 +35,11 @@ def send_telegram(msg):
 
 
 def fmt_price(val):
-    return f"${val:.5f}" if val < 1.0 else f"${val:.4f}"
+    if val < 0.01:
+        return f"${val:.6f}"
+    if val < 1.0:
+        return f"${val:.5f}"
+    return f"${val:.4f}"
 
 
 if "last_alert" not in st.session_state:
@@ -112,13 +116,16 @@ if signal:
     dir_icon = "🟢 LONG" if signal["direction"] == "LONG" else "🔴 SHORT"
     st.success(f"### 🎯 TOP QUALIFIED CRYPTO SCALP: **{signal['symbol']}** — {dir_icon} ({signal['score']}%)")
 
-    m1, m2, m3, m4, m5, m6 = st.columns(6)
-    m1.metric("Entry Price", fmt_price(signal["entry"]))
-    m2.metric("Leverage (Isolated)", f"{signal['leverage']}x")
-    m3.metric("TP 1 (50%)", fmt_price(signal["tp1"]))
-    m4.metric("TP 2 (Runner)", fmt_price(signal["tp2"]))
-    m5.metric("Stop-Loss", fmt_price(signal["sl"]), f"-{signal['sl_pct']}%")
-    m6.metric("Suggested Margin", f"${rec_margin} USDT")
+    # Two spacious 3-column rows so every single decimal digit displays in full
+    r1_c1, r1_c2, r1_c3 = st.columns(3)
+    r1_c1.metric("Entry Price", fmt_price(signal["entry"]))
+    r1_c2.metric("Leverage (Isolated)", f"{signal['leverage']}x")
+    r1_c3.metric("Suggested Margin", f"${rec_margin:.2f} USDT")
+
+    r2_c1, r2_c2, r2_c3 = st.columns(3)
+    r2_c1.metric("TP 1 (50% Close)", fmt_price(signal["tp1"]))
+    r2_c2.metric("TP 2 (Full Target)", fmt_price(signal["tp2"]))
+    r2_c3.metric("Stop-Loss", fmt_price(signal["sl"]), f"-{signal['sl_pct']}%")
 
     st.info(f"⏳ **Close By:** **{signal['close_pkt']}** ({signal['close_utc']} — ~{signal['hold_mins']}m) | {signal['astro_note']} | OB: {signal['ob_ratio']}x | RSI: {signal['rsi']}")
 
