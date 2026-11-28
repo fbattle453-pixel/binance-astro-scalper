@@ -3,8 +3,9 @@ from datetime import datetime, timedelta
 from astro_core import get_astro, score_astro
 
 PROTO = "https" + chr(58) + chr(47) + chr(47)
-BASE = PROTO + chr(46).join(["futures", "kraken", "com"]) + "/derivatives/api/v3"
-CC_BASE = PROTO + chr(46).join(["min-api", "cryptocompare", "com"])
+HOST = chr(46).join(["futures", "kraken", "com"])
+BASE = PROTO + HOST + "/derivatives/api/v3"
+CHART = PROTO + HOST + "/api/charts/v1/trade"
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 BINANCE_FUTURES_COINS = {
@@ -20,16 +21,14 @@ def last_val(series):
 
 def get_btc_regime():
     try:
-        url = f"{CC_BASE}/data/v2/histominute"
-        p = {"fsym": "BTC", "tsym": "USDT", "limit": 30, "aggregate": 15}
-        k15 = requests.get(url, params=p, headers=HEADERS, timeout=5).json()
-        df = pd.DataFrame(k15["Data"]["Data"]).astype(float)
-        price = last_val(df["close"])
+        k15 = requests.get(f"{CHART}/PF_XBTUSD/15m", headers=HEADERS, timeout=5).json().get("candles", [])
+        df = pd.DataFrame(k15).tail(25).astype(float)
+        p = last_val(df["close"])
         e9 = last_val(df["close"].ewm(span=9).mean())
         e21 = last_val(df["close"].ewm(span=21).mean())
-        if price > e21 and e9 > e21:
+        if p > e21 and e9 > e21:
             return "BULL"
-        if price < e21 and e9 < e21:
+        if p < e21 and e9 < e21:
             return "BEAR"
         return "CHOP"
     except Exception:
@@ -56,21 +55,19 @@ def run_market_scan(mode="Western"):
             fund = float(t.get("fundingRate") or 0) * 100.0
             if 0.001 <= p <= 200.00 and vol >= 250_000 and 1.0 <= pct <= 12.0:
                 cands.append({"inst": sym, "base": base, "sym": f"{base}USDT", "vol": vol, "fund": fund, "rank": pct * np.log10(max(vol, 10))})
-        cands = list(sorted(cands, key=lambda x: x["rank"], reverse=True))[:25]
+        cands = list(sorted(cands, key=lambda x: x["rank"], reverse=True))[:20]
     except Exception as e:
         return pd.DataFrame(), None, 0, f"Err: {e}"
 
     ctx, rows = get_astro(mode), []
     for c in cands:
         try:
-            url = f"{CC_BASE}/data/v2/histominute"
-            prm = {"fsym": c["base"], "tsym": "USDT", "limit": 96, "aggregate": 15}
-            k15_raw = requests.get(url, params=prm, headers=HEADERS, timeout=5).json().get("Data", {}).get("Data", [])
+            k15_raw = requests.get(f"{CHART}/{c['inst']}/15m", headers=HEADERS, timeout=5).json().get("candles", [])
             obd = requests.get(BASE + "/orderbook", params={"symbol": c["inst"]}, timeout=5).json().get("orderBook", {})
             if len(k15_raw) < 40:
                 continue
 
-            df = pd.DataFrame(k15_raw).astype(float)
+            df = pd.DataFrame(k15_raw).tail(96).astype(float)
             price = last_val(df["close"])
             if price <= 0:
                 continue
@@ -80,7 +77,7 @@ def run_market_scan(mode="Western"):
             room_hi = ((hi24 - price) / max(price, 1e-9)) * 100.0
 
             e9, e21, e50 = last_val(df["close"].ewm(span=9).mean()), last_val(df["close"].ewm(span=21).mean()), last_val(df["close"].ewm(span=50).mean())
-            vwap = float((df["close"] * df["volumeto"]).sum() / max(df["volumeto"].sum(), 1e-9))
+            vwap = float((df["close"] * df["volume"]).sum() / max(df["volume"].sum(), 1e-9))
             d = df["close"].diff()
             rsi = 100.0 - (100.0 / (1.0 + last_val(d.clip(lower=0).rolling(14).mean()) / max(last_val((-d.clip(upper=0)).rolling(14).mean()), 1e-9)))
             tr = pd.concat([df["high"] - df["low"], (df["high"] - df["close"].shift()).abs(), (df["low"] - df["close"].shift()).abs()], axis=1).max(axis=1)
@@ -125,4 +122,4 @@ def run_market_scan(mode="Western"):
         c_utc = datetime.now(pytz.UTC) + timedelta(minutes=45)
         c_pkt = c_utc.astimezone(pytz.timezone("Asia/Karachi"))
         sig = dict(symbol=b["Symbol"], direction=b["Direction"], score=sc, leverage=lev, entry=ent, tp1=tp1, tp2=tp2, sl=sl, sl_pct=round(sl_p * 100, 2), close_utc=c_utc.strftime("%H:%M:%S UTC"), close_pkt=c_pkt.strftime("%I:%M:%S %p PKT"), hold_mins=45, astro_note=b["Astro Note"], ob_ratio=b["OB Ratio"], rsi=b["5m RSI"])
-    return df, sig, len(cands), f"BTC:{btc_state} | Binance USDT Sync ({len(rows)} scored)"
+    return df, sig, len(cands), f"BTC:{btc_state} | Fast Binance Sync ({len(rows)} scored)"
